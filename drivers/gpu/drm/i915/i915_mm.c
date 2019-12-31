@@ -43,6 +43,8 @@ struct remap_pfn {
 	struct vm_area_struct *vma;
 	vm_memattr_t attr;
 #endif
+
+	struct sgt_iter sgt;
 };
 
 #ifdef __FreeBSD__
@@ -120,6 +122,30 @@ static int remap_pfn(pte_t *pte, unsigned long addr, void *data)
 	return 0;
 }
 
+static inline unsigned long sgt_pfn(const struct sgt_iter *sgt)
+{
+	return sgt->pfn + (sgt->curr >> PAGE_SHIFT);
+}
+
+static int remap_sg_page(pte_t *pte, unsigned long addr, void *data)
+{
+	struct remap_pfn *r = data;
+
+	if (GEM_WARN_ON(!r->sgt.pfn))
+		return -EINVAL;
+
+	/* Special PTE are not associated with any struct page */
+	set_pte_at(r->mm, addr, pte,
+		   pte_mkspecial(pfn_pte(sgt_pfn(&r->sgt), r->prot)));
+	r->pfn++; /* track insertions in case we need to unwind later */
+
+	r->sgt.curr += PAGE_SIZE;
+	if (r->sgt.curr >= r->sgt.max)
+		r->sgt = __sgt_iter(__sg_next(r->sgt.sgp), false);
+
+	return 0;
+}
+
 /**
  * remap_io_mapping - remap an IO mapping to userspace
  * @vma: user vma to map to
@@ -154,6 +180,39 @@ int remap_io_mapping(struct vm_area_struct *vma,
 	err = apply_to_page_range(r.mm, addr, size, remap_pfn, &r);
 	if (unlikely(err)) {
 		zap_vma_ptes(vma, addr, (r.pfn - pfn) << PAGE_SHIFT);
+		return err;
+	}
+
+	return 0;
+}
+
+/**
+ * remap_io_sg_page - remap an IO mapping to userspace
+ * @vma: user vma to map to
+ * @addr: target user address to start at
+ * @size: size of map area
+ * @sgl: Start sg entry
+ *
+ *  Note: this is only safe if the mm semaphore is held when called.
+ */
+int remap_io_sg_page(struct vm_area_struct *vma,
+		     unsigned long addr, unsigned long size,
+		     struct scatterlist *sgl)
+{
+	struct remap_pfn r = {
+		.mm = vma->vm_mm,
+		.prot = vma->vm_page_prot,
+		.sgt = __sgt_iter(sgl, false),
+	};
+	int err;
+
+	/* We rely on prevalidation of the io-mapping to skip track_pfn(). */
+	GEM_BUG_ON((vma->vm_flags & EXPECTED_FLAGS) != EXPECTED_FLAGS);
+
+	flush_cache_range(vma, addr, size);
+	err = apply_to_page_range(r.mm, addr, size, remap_sg_page, &r);
+	if (unlikely(err)) {
+		zap_vma_ptes(vma, addr, r.pfn << PAGE_SHIFT);
 		return err;
 	}
 
