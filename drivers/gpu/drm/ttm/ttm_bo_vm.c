@@ -356,7 +356,7 @@ EXPORT_SYMBOL(ttm_bo_vm_fault_reserved);
 #ifdef __linux__
 vm_fault_t ttm_bo_vm_fault(struct vm_fault *vmf)
 #elif defined (__FreeBSD__)
-static vm_fault_t ttm_bo_vm_fault(struct vm_area_struct *dummy, struct vm_fault *vmf)
+vm_fault_t ttm_bo_vm_fault(struct vm_area_struct *dummy, struct vm_fault *vmf)
 #endif
 {
 	struct vm_area_struct *vma = vmf->vma;
