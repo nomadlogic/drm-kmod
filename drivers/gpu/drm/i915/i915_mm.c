@@ -29,18 +29,92 @@
 
 #include "i915_drv.h"
 
+#ifdef __FreeBSD__
+#include <vm/vm_pageout.h>
+#define	pte_t	linux_pte_t
+#endif
+
 struct remap_pfn {
 	struct mm_struct *mm;
 	unsigned long pfn;
+#ifdef __linux__
 	pgprot_t prot;
+#elif defined(__FreeBSD__)
+	struct vm_area_struct *vma;
+	vm_memattr_t attr;
+#endif
 };
+
+#ifdef __FreeBSD__
+static inline int
+insert_pfn(vm_object_t vm_obj, unsigned long addr, unsigned long pfn,
+    vm_memattr_t attr)
+{
+	vm_page_t m;
+	vm_paddr_t pa;
+	vm_pindex_t pidx;
+
+	VM_OBJECT_ASSERT_WLOCKED(vm_obj);
+	pa = IDX_TO_OFF(pfn);
+	pidx = OFF_TO_IDX(addr);
+
+retry:
+	m = vm_page_grab(vm_obj, pidx, VM_ALLOC_NOCREAT);
+	if (m == NULL) {
+		m = PHYS_TO_VM_PAGE(pa);
+		if (!vm_page_busy_acquire(m, VM_ALLOC_WAITFAIL))
+			goto retry;
+		if (vm_page_insert(m, vm_obj, pidx)) {
+			vm_page_xunbusy(m);
+#if 0
+			return (-ENOMEM);
+#else
+			VM_OBJECT_WUNLOCK(vm_obj);
+			vm_wait(NULL);
+			VM_OBJECT_WLOCK(vm_obj);
+			goto retry;
+#endif
+		}
+		vm_page_valid(m);
+	}
+	pmap_page_set_memattr(m, attr);
+
+	return (0);
+}
+
+#define	apply_to_page_range(dummy, addr, size, fn, data)	\
+	_apply_to_page_range(addr, size, fn, data)
+static int
+_apply_to_page_range(unsigned long start_addr, unsigned long size,
+    pte_fn_t fn,  struct remap_pfn *r)
+{
+	unsigned long addr;
+	int err = 0;
+
+	r->vma->vm_pfn_first = OFF_TO_IDX(start_addr);
+	VM_OBJECT_WLOCK(r->vma->vm_obj);
+	for (addr = start_addr; addr < start_addr + size; addr += PAGE_SIZE) {
+		err = fn(0, addr, r);
+		if (err)
+			break;
+		r->vma->vm_pfn_count++;
+	}
+	VM_OBJECT_WUNLOCK(r->vma->vm_obj);
+
+	return (err);
+}
+#endif
 
 static int remap_pfn(pte_t *pte, unsigned long addr, void *data)
 {
 	struct remap_pfn *r = data;
 
+#ifdef __linux__
 	/* Special PTE are not associated with any struct page */
 	set_pte_at(r->mm, addr, pte, pte_mkspecial(pfn_pte(r->pfn, r->prot)));
+#elif defined(__FreeBSD__)
+	insert_pfn(r->vma->vm_obj, addr, r->pfn, r->attr);
+#endif
 	r->pfn++;
 
 	return 0;
@@ -69,8 +143,13 @@ int remap_io_mapping(struct vm_area_struct *vma,
 	/* We rely on prevalidation of the io-mapping to skip track_pfn(). */
 	r.mm = vma->vm_mm;
 	r.pfn = pfn;
+#ifdef __linux__
 	r.prot = __pgprot((pgprot_val(iomap->prot) & _PAGE_CACHE_MASK) |
 			  (pgprot_val(vma->vm_page_prot) & ~_PAGE_CACHE_MASK));
+#elif defined(__FreeBSD__)
+	r.vma = vma;
+	r.attr = iomap->attr;
+#endif
 
 	err = apply_to_page_range(r.mm, addr, size, remap_pfn, &r);
 	if (unlikely(err)) {
