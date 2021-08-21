@@ -163,46 +163,63 @@ i915_locks_destroy(struct drm_i915_private *dev_priv)
 	mutex_destroy(&dev_priv->av_mutex);
 }
 
-int
-remap_io_mapping(struct vm_area_struct *vma, unsigned long addr,
-    unsigned long pfn, unsigned long size, struct io_mapping *iomap)
+static int
+fbsd_vm_insert_pfn(vm_object_t vm_obj, unsigned long addr, unsigned long pfn,
+    vm_memattr_t attr)
 {
 	vm_page_t m;
+	vm_paddr_t pa;
+	vm_pindex_t pidx;
+
+	VM_OBJECT_ASSERT_WLOCKED(vm_obj);
+	pa = IDX_TO_OFF(pfn);
+	pidx = OFF_TO_IDX(addr);
+
+retry:
+	m = vm_page_grab(vm_obj, pidx, VM_ALLOC_NOCREAT);
+	if (m == NULL) {
+		m = PHYS_TO_VM_PAGE(pa);
+		if (!vm_page_busy_acquire(m, VM_ALLOC_WAITFAIL))
+			goto retry;
+		if (vm_page_insert(m, vm_obj, pidx)) {
+			vm_page_xunbusy(m);
+#if 0
+			return (-ENOMEM);
+#else
+			VM_OBJECT_WUNLOCK(vm_obj);
+			vm_wait(NULL);
+			VM_OBJECT_WLOCK(vm_obj);
+			goto retry;
+#endif
+		}
+		vm_page_valid(m);
+	}
+	pmap_page_set_memattr(m, attr);
+
+	return (0);
+}
+
+int
+remap_io_mapping(struct vm_area_struct *vma, unsigned long start_addr,
+    unsigned long pfn, unsigned long size, struct io_mapping *iomap)
+{
 	vm_object_t vm_obj;
 	vm_memattr_t attr;
-	vm_paddr_t pa;
-	vm_pindex_t pidx, pidx_start;
-	int count, rc;
+	unsigned long addr;
+	int rc = 0;
 
 	attr = iomap->attr;
-	count = size >> PAGE_SHIFT;
-	pa = pfn << PAGE_SHIFT;
-	pidx_start = OFF_TO_IDX(addr);
-	rc = 0;
 	vm_obj = vma->vm_obj;
 
-	vma->vm_pfn_first = pidx_start;
+	vma->vm_pfn_first = OFF_TO_IDX(start_addr);
 
 	VM_OBJECT_WLOCK(vm_obj);
-	for (pidx = pidx_start; pidx < pidx_start + count;
-	    pidx++, pa += PAGE_SIZE) {
-retry:
-		m = vm_page_grab(vm_obj, pidx, VM_ALLOC_NOCREAT);
-		if (m == NULL) {
-			m = PHYS_TO_VM_PAGE(pa);
-			if (!vm_page_busy_acquire(m, VM_ALLOC_WAITFAIL))
-				goto retry;
-			if (vm_page_insert(m, vm_obj, pidx)) {
-				vm_page_xunbusy(m);
-				VM_OBJECT_WUNLOCK(vm_obj);
-				vm_wait(NULL);
-				VM_OBJECT_WLOCK(vm_obj);
-				goto retry;
-			}
-			vm_page_valid(m);
-		}
-		pmap_page_set_memattr(m, attr);
+	for (addr = start_addr; addr < start_addr + size; addr += PAGE_SIZE) {
+		rc = fbsd_vm_insert_pfn(vm_obj, addr, pfn, attr);
+		if (rc != 0)
+			break;
 		vma->vm_pfn_count++;
+		pfn++;
 	}
 	VM_OBJECT_WUNLOCK(vm_obj);
 	return (rc);
