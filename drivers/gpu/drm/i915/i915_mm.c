@@ -56,6 +56,7 @@ insert_pfn(vm_object_t vm_obj, unsigned long addr, unsigned long pfn,
 	vm_page_t m;
 	vm_paddr_t pa;
 	vm_pindex_t pidx;
+	vm_object_t rmobj;
 
 	VM_OBJECT_ASSERT_WLOCKED(vm_obj);
 	pa = IDX_TO_OFF(pfn);
@@ -67,6 +68,15 @@ retry:
 		m = PHYS_TO_VM_PAGE(pa);
 		if (!vm_page_busy_acquire(m, VM_ALLOC_WAITFAIL))
 			goto retry;
+		if (m->object != NULL) {
+			rmobj = m->object;
+			VM_OBJECT_WUNLOCK(vm_obj);
+			VM_OBJECT_WLOCK(rmobj);
+			vm_page_remove(m);
+			VM_OBJECT_WUNLOCK(rmobj);
+			VM_OBJECT_WLOCK(vm_obj);
+			goto retry;
+		}
 		if (vm_page_insert(m, vm_obj, pidx)) {
 			vm_page_xunbusy(m);
 #if 0
