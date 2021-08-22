@@ -140,9 +140,13 @@ static int remap_sg(pte_t *pte, unsigned long addr, void *data)
 	if (GEM_WARN_ON(!r->sgt.pfn))
 		return -EINVAL;
 
+#ifdef __linux__
 	/* Special PTE are not associated with any struct page */
 	set_pte_at(r->mm, addr, pte,
 		   pte_mkspecial(pfn_pte(sgt_pfn(r), r->prot)));
+#elif defined(__FreeBSD__)
+	insert_pfn(r->vma->vm_obj, addr, sgt_pfn(r), r->attr);
+#endif
 	r->pfn++; /* track insertions in case we need to unwind later */
 
 	r->sgt.curr += PAGE_SIZE;
@@ -208,7 +212,12 @@ int remap_io_sg(struct vm_area_struct *vma,
 {
 	struct remap_pfn r = {
 		.mm = vma->vm_mm,
+#ifdef __linux__
 		.prot = vma->vm_page_prot,
+#elif defined(__FreeBSD__)
+		.vma = vma,
+		.attr = pgprot2cachemode(vma->vm_page_prot),
+#endif
 		.sgt = __sgt_iter(sgl, use_dma(iobase)),
 		.iobase = iobase,
 	};
@@ -217,8 +226,10 @@ int remap_io_sg(struct vm_area_struct *vma,
 	/* We rely on prevalidation of the io-mapping to skip track_pfn(). */
 	GEM_BUG_ON((vma->vm_flags & EXPECTED_FLAGS) != EXPECTED_FLAGS);
 
+#ifdef __linux__
 	if (!use_dma(iobase))
 		flush_cache_range(vma, addr, size);
+#endif
 
 	err = apply_to_page_range(r.mm, addr, size, remap_sg, &r);
 	if (unlikely(err)) {
