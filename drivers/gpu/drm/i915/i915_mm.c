@@ -32,6 +32,7 @@
 #ifdef __FreeBSD__
 #include <vm/vm_pageout.h>
 #define	pte_t	linux_pte_t
+typedef int (*pte_fn_t_1)(linux_pte_t *, unsigned long addr, void *data);
 #endif
 
 struct remap_pfn {
@@ -99,7 +100,7 @@ retry:
 	_apply_to_page_range(addr, size, fn, data)
 static int
 _apply_to_page_range(unsigned long start_addr, unsigned long size,
-    pte_fn_t fn,  struct remap_pfn *r)
+    pte_fn_t_1 fn,  struct remap_pfn *r)
 {
 	unsigned long addr;
 	int err = 0;
